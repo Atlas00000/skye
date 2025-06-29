@@ -3,7 +3,7 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Dimensions, Easing, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import LoadingScreen from '@/components/LoadingScreen';
@@ -14,22 +14,142 @@ import { LoadingState, WeatherData, weatherService } from '@/services/weatherSer
 
 const { width } = Dimensions.get('window');
 
+// Memoized count-up hook for better performance
 function useCountUp(to: number, duration = 1200) {
   const [value, setValue] = useState(0);
   useEffect(() => {
     let start = 0;
     const startTime = Date.now();
+    let animationFrame: number;
+    
     function animate() {
       const now = Date.now();
       const elapsed = now - startTime;
       const progress = Math.min(elapsed / duration, 1);
       setValue(Math.round(start + (to - start) * progress));
-      if (progress < 1) requestAnimationFrame(animate);
+      if (progress < 1) {
+        animationFrame = requestAnimationFrame(animate);
+      }
     }
     animate();
+    
+    return () => {
+      if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+      }
+    };
   }, [to, duration]);
   return value;
 }
+
+// Memoized weather widget component
+const WeatherWidget = React.memo(({ 
+  icon, 
+  label, 
+  value, 
+  unit, 
+  color = "#7a8fa6",
+  iconColor = "#b5c6d6" 
+}: {
+  icon: string;
+  label: string;
+  value: string | number;
+  unit?: string;
+  color?: string;
+  iconColor?: string;
+}) => (
+  <View style={{ flex: 1, alignItems: 'center' }}>
+    <Ionicons name={icon as any} size={28} color={iconColor} />
+    <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>{label}</Text>
+    <Text style={{ fontFamily: 'Inter_600SemiBold', color, fontSize: 18, marginTop: 2 }}>
+      {value}{unit}
+    </Text>
+  </View>
+));
+
+// Memoized hourly forecast item
+const HourlyForecastItem = React.memo(({ 
+  hour, 
+  temp, 
+  icon, 
+  index, 
+  anim, 
+  onPress, 
+  isPressed 
+}: {
+  hour: string;
+  temp: number;
+  icon: string;
+  index: number;
+  anim: Animated.Value;
+  onPress: () => void;
+  isPressed: boolean;
+}) => {
+  const scale = isPressed ? 0.96 : 1;
+  
+  return (
+    <Animated.View
+      style={{
+        opacity: anim,
+        transform: [
+          { translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) },
+          { scale },
+        ],
+      }}
+    >
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [styles.hourlyCard, pressed && { opacity: 0.8 }]}
+      >
+        <Text style={styles.hourlyHour}>{hour}</Text>
+        <Ionicons name={icon as any} size={28} color="#b5c6d6" />
+        <Text style={styles.hourlyTemp}>{temp}°</Text>
+      </Pressable>
+    </Animated.View>
+  );
+});
+
+// Memoized daily forecast item
+const DailyForecastItem = React.memo(({ 
+  day, 
+  temp, 
+  icon, 
+  index, 
+  anim, 
+  onPress, 
+  isPressed 
+}: {
+  day: string;
+  temp: number;
+  icon: string;
+  index: number;
+  anim: Animated.Value;
+  onPress: () => void;
+  isPressed: boolean;
+}) => {
+  const scale = isPressed ? 0.96 : 1;
+  
+  return (
+    <Animated.View
+      style={{
+        opacity: anim,
+        transform: [
+          { translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) },
+          { scale },
+        ],
+      }}
+    >
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [styles.dailyCard, pressed && { opacity: 0.8 }]}
+      >
+        <Text style={styles.dailyDay}>{day}</Text>
+        <Ionicons name={icon as any} size={28} color="#b5c6d6" />
+        <Text style={styles.dailyTemp}>{temp}°</Text>
+      </Pressable>
+    </Animated.View>
+  );
+});
 
 export default function HomeScreen() {
   const [fontsLoaded] = useFonts({ Inter_400Regular, Inter_600SemiBold });
@@ -57,23 +177,75 @@ export default function HomeScreen() {
   const [pressedIndex, setPressedIndex] = useState<number | null>(null);
   const router = useRouter();
 
-  // Safe data access functions
-  const getSafeTemperature = (temp: any): number => {
+  // Memoized safe data access functions
+  const getSafeTemperature = useCallback((temp: any): number => {
     if (typeof temp === 'number' && !isNaN(temp)) {
       return Math.round(temp);
     }
     return 0;
-  };
+  }, []);
 
-  const getSafeString = (value: any, fallback: string = ''): string => {
+  const getSafeString = useCallback((value: any, fallback: string = ''): string => {
     return typeof value === 'string' ? value : fallback;
-  };
+  }, []);
 
-  const getSafeArray = (value: any): any[] => {
+  const getSafeArray = useCallback((value: any): any[] => {
     return Array.isArray(value) ? value : [];
-  };
+  }, []);
 
-  const tempValue = useCountUp(getSafeTemperature(weatherData?.current.temp) || 0, 1200);
+  // Memoized temperature value
+  const tempValue = useMemo(() => {
+    return getSafeTemperature(weatherData?.current.temp) || 0;
+  }, [weatherData?.current.temp, getSafeTemperature]);
+
+  const animatedTempValue = useCountUp(tempValue, 1200);
+
+  // Memoized animation interpolations
+  const headerTranslate = useMemo(() => 
+    scrollY.interpolate({
+      inputRange: [0, 120],
+      outputRange: [0, -60],
+      extrapolate: 'clamp',
+    }), [scrollY]);
+
+  const cloudTranslate = useMemo(() => 
+    cloudAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 20] }), [cloudAnim]);
+
+  const mistOpacity = useMemo(() => 
+    mistAnim.interpolate({ inputRange: [0, 1], outputRange: [0.18, 0.32] }), [mistAnim]);
+
+  const mistDrift = useMemo(() => 
+    mistAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 30] }), [mistAnim]);
+
+  const shimmerTranslate = useMemo(() => 
+    shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-100, 300] }), [shimmerAnim]);
+
+  // Memoized weather data for widgets
+  const weatherWidgetsData = useMemo(() => {
+    if (!weatherData) return null;
+    
+    return {
+      feelsLike: getSafeTemperature(weatherData.current.feels_like),
+      uvIndex: getSafeTemperature(weatherData.current.uv_index),
+      precipitation: getSafeTemperature(weatherData.current.precipitation),
+      sunrise: getSafeString(weatherData.current.sunrise, '--:--'),
+      sunset: getSafeString(weatherData.current.sunset, '--:--'),
+      aqi: getSafeTemperature(weatherData.current.aqi),
+      aqiStatus: getSafeString(weatherData.current.aqi_status, 'Unknown'),
+      aqiColor: getSafeString(weatherData.current.aqi_color, '#b5c6d6'),
+      description: getSafeString(weatherData.current.description, 'Unknown'),
+    };
+  }, [weatherData, getSafeTemperature, getSafeString]);
+
+  // Memoized forecast data
+  const forecastData = useMemo(() => {
+    if (!weatherData) return { hourly: [], daily: [] };
+    
+    return {
+      hourly: getSafeArray(weatherData.hourly),
+      daily: getSafeArray(weatherData.daily),
+    };
+  }, [weatherData, getSafeArray]);
 
   // Load weather data with real location
   const loadWeatherData = useCallback(async (showProgress = true) => {
@@ -203,19 +375,68 @@ export default function HomeScreen() {
     }
   };
 
-  // Refresh weather data
-  const refreshWeather = useCallback(async () => {
+  // Memoized event handlers to prevent re-renders
+  const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     await loadWeatherData(true);
     setIsRefreshing(false);
   }, [loadWeatherData]);
 
-  // Handle navigation with transitions
   const handleNavigation = useCallback(async (screen: string) => {
     setShowTransition(true);
     await navigationService.navigateTo(screen);
     setTimeout(() => setShowTransition(false), 500);
   }, []);
+
+  const handleHourlyPress = useCallback((index: number) => {
+    setPressedIndex(index);
+    // Reset after animation
+    setTimeout(() => setPressedIndex(null), 150);
+  }, []);
+
+  const handleDailyPress = useCallback((index: number) => {
+    setPressedIndex(100 + index);
+    // Reset after animation
+    setTimeout(() => setPressedIndex(null), 150);
+  }, []);
+
+  // Memoized animation configurations for better performance
+  const animationConfig = useMemo(() => ({
+    header: {
+      duration: 600,
+      useNativeDriver: true,
+    },
+    fade: {
+      duration: 500,
+      useNativeDriver: true,
+    },
+    stagger: {
+      duration: 500,
+      delay: 120,
+      useNativeDriver: true,
+    },
+    cloud: {
+      duration: 4000,
+      useNativeDriver: true,
+    },
+    mist: {
+      duration: 9000,
+      useNativeDriver: true,
+    },
+    alert: {
+      friction: 7,
+      tension: 60,
+      delay: 1800,
+      useNativeDriver: true,
+    },
+  }), []);
+
+  // Memoized scroll event handler
+  const handleScroll = useMemo(() => 
+    Animated.event(
+      [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+      { useNativeDriver: true }
+    ), [scrollY]);
 
   useEffect(() => {
     loadWeatherData(false);
@@ -232,13 +453,13 @@ export default function HomeScreen() {
 
     // Header fade in
     Animated.sequence([
-      Animated.timing(headerFade, { toValue: 1, duration: 600, useNativeDriver: true }),
-      Animated.timing(dateFade, { toValue: 1, duration: 500, delay: 200, useNativeDriver: true }),
+      Animated.timing(headerFade, { toValue: 1, ...animationConfig.header }),
+      Animated.timing(dateFade, { toValue: 1, delay: 200, ...animationConfig.fade }),
     ]).start();
 
     // Summary/details fade in
-    Animated.timing(summaryFade, { toValue: 1, duration: 600, delay: 400, useNativeDriver: true }).start();
-    Animated.timing(detailsFade, { toValue: 1, duration: 600, delay: 600, useNativeDriver: true }).start();
+    Animated.timing(summaryFade, { toValue: 1, delay: 400, ...animationConfig.fade }).start();
+    Animated.timing(detailsFade, { toValue: 1, delay: 600, ...animationConfig.fade }).start();
 
     // Shimmer
     Animated.loop(
@@ -254,43 +475,38 @@ export default function HomeScreen() {
     newHourlyAnims.forEach((anim, i) => {
       Animated.timing(anim, {
         toValue: 1,
-        duration: 500,
-        delay: 800 + i * 120,
-        useNativeDriver: true,
+        delay: 800 + i * animationConfig.stagger.delay,
+        ...animationConfig.stagger,
       }).start();
     });
 
     newDailyAnims.forEach((anim, i) => {
       Animated.timing(anim, {
         toValue: 1,
-        duration: 500,
-        delay: 1200 + i * 120,
-        useNativeDriver: true,
+        delay: 1200 + i * animationConfig.stagger.delay,
+        ...animationConfig.stagger,
       }).start();
     });
 
     // Cloud/mist animations
     Animated.loop(
       Animated.sequence([
-        Animated.timing(cloudAnim, { toValue: 1, duration: 4000, useNativeDriver: true }),
-        Animated.timing(cloudAnim, { toValue: 0, duration: 4000, useNativeDriver: true }),
+        Animated.timing(cloudAnim, { toValue: 1, ...animationConfig.cloud }),
+        Animated.timing(cloudAnim, { toValue: 0, ...animationConfig.cloud }),
       ])
     ).start();
 
     Animated.loop(
       Animated.sequence([
-        Animated.timing(mistAnim, { toValue: 1, duration: 9000, useNativeDriver: true }),
-        Animated.timing(mistAnim, { toValue: 0, duration: 9000, useNativeDriver: true }),
+        Animated.timing(mistAnim, { toValue: 1, ...animationConfig.mist }),
+        Animated.timing(mistAnim, { toValue: 0, ...animationConfig.mist }),
       ])
     ).start();
 
     // Alert slide in
     Animated.spring(alertAnim, {
       toValue: 0,
-      useNativeDriver: true,
-      friction: 7,
-      tension: 60,
-      delay: 1800,
+      ...animationConfig.alert,
     }).start();
   }, [weatherData]);
 
@@ -319,7 +535,7 @@ export default function HomeScreen() {
           <Ionicons name="cloud-offline" size={64} color="#b5c6d6" />
           <Text style={styles.errorTitle}>Unable to Load Weather</Text>
           <Text style={styles.errorMessage}>{loadingState.error}</Text>
-          <Pressable onPress={refreshWeather} style={styles.retryButton}>
+          <Pressable onPress={handleRefresh} style={styles.retryButton}>
             <BlurView intensity={40} tint="light" style={styles.retryButtonBlur}>
               <Ionicons name="refresh" size={20} color="#7ed957" />
               <Text style={styles.retryButtonText}>Try Again</Text>
@@ -331,17 +547,6 @@ export default function HomeScreen() {
   }
 
   if (!weatherData) return null;
-
-  // Parallax for header
-  const headerTranslate = scrollY.interpolate({
-    inputRange: [0, 120],
-    outputRange: [0, -60],
-    extrapolate: 'clamp',
-  });
-  const cloudTranslate = cloudAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 20] });
-  const mistOpacity = mistAnim.interpolate({ inputRange: [0, 1], outputRange: [0.18, 0.32] });
-  const mistDrift = mistAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 30] });
-  const shimmerTranslate = shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: [-100, 300] });
 
   return (
     <View style={{ flex: 1, backgroundColor: '#f7fafd' }}>
@@ -385,14 +590,11 @@ export default function HomeScreen() {
         contentContainerStyle={styles.container}
         showsVerticalScrollIndicator={false}
         scrollEventThrottle={16}
-        onScroll={Animated.event(
-          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
-          { useNativeDriver: true }
-        )}
+        onScroll={handleScroll}
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}
-            onRefresh={refreshWeather}
+            onRefresh={handleRefresh}
             tintColor="#7a8fa6"
             colors={["#7a8fa6"]}
             progressBackgroundColor="rgba(255,255,255,0.8)"
@@ -441,7 +643,7 @@ export default function HomeScreen() {
                 style={{ flex: 1, width: 120 }}
               />
             </Animated.View>
-            <Animated.Text style={[styles.temp, { opacity: summaryFade }]}>{getSafeTemperature(weatherData.current.temp)}°</Animated.Text>
+            <Animated.Text style={[styles.temp, { opacity: summaryFade }]}>{animatedTempValue}°</Animated.Text>
             <Animated.Text style={[styles.summary, { 
               opacity: summaryFade, 
               transform: [{ 
@@ -477,19 +679,21 @@ export default function HomeScreen() {
 
         {/* Feels Like & UV Index Widget */}
         <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <MaterialCommunityIcons name="thermometer" size={28} color="#b5c6d6" />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Feels Like</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.feels_like)}°</Text>
-          </View>
+          <WeatherWidget 
+            icon="thermometer" 
+            label="Feels Like" 
+            value={weatherWidgetsData?.feelsLike || 0} 
+            unit="°" 
+            iconColor="#b5c6d6"
+          />
           <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
           <View style={{ flex: 1, alignItems: 'center' }}>
             <MaterialCommunityIcons name="weather-sunny-alert" size={28} color="#f7c873" />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>UV Index</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
-              <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18 }}>{getSafeTemperature(weatherData.current.uv_index)}</Text>
+              <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18 }}>{weatherWidgetsData?.uvIndex || 0}</Text>
               <View style={{ width: 60, height: 8, backgroundColor: '#e3eaf7', borderRadius: 4, marginLeft: 8, overflow: 'hidden' }}>
-                <View style={{ width: (getSafeTemperature(weatherData.current.uv_index) / 11) * 60, height: 8, backgroundColor: '#f7c873', borderRadius: 4 }} />
+                <View style={{ width: ((weatherWidgetsData?.uvIndex || 0) / 11) * 60, height: 8, backgroundColor: '#f7c873', borderRadius: 4 }} />
               </View>
             </View>
           </View>
@@ -497,45 +701,51 @@ export default function HomeScreen() {
 
         {/* Precipitation Widget */}
         <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Ionicons name="rainy" size={28} color="#7a8fa6" />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Precipitation</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.precipitation)}%</Text>
-          </View>
+          <WeatherWidget 
+            icon="rainy" 
+            label="Precipitation" 
+            value={weatherWidgetsData?.precipitation || 0} 
+            unit="%" 
+            iconColor="#7a8fa6"
+          />
           <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Ionicons name="cloud" size={28} color="#b5c6d6" />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Conditions</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 16, marginTop: 2, textAlign: 'center' }}>{getSafeString(weatherData.current.description, 'Unknown')}</Text>
-          </View>
+          <WeatherWidget 
+            icon="cloud" 
+            label="Conditions" 
+            value={weatherWidgetsData?.description || 'Unknown'} 
+            iconColor="#b5c6d6"
+          />
         </BlurView>
 
         {/* Sunrise & Sunset Widget */}
         <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Ionicons name="sunny-outline" size={28} color="#f7c873" />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Sunrise</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeString(weatherData.current.sunrise, '--:--')}</Text>
-          </View>
+          <WeatherWidget 
+            icon="sunny-outline" 
+            label="Sunrise" 
+            value={weatherWidgetsData?.sunrise || '--:--'} 
+            iconColor="#f7c873"
+          />
           <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Ionicons name="moon-outline" size={28} color="#b5c6d6" />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Sunset</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeString(weatherData.current.sunset, '--:--')}</Text>
-          </View>
+          <WeatherWidget 
+            icon="moon-outline" 
+            label="Sunset" 
+            value={weatherWidgetsData?.sunset || '--:--'} 
+            iconColor="#b5c6d6"
+          />
         </BlurView>
 
         {/* Air Quality Widget */}
         <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <MaterialCommunityIcons name="air-filter" size={28} color={getSafeString(weatherData.current.aqi_color, '#b5c6d6')} />
-            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Air Quality</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.aqi)}</Text>
-          </View>
+          <WeatherWidget 
+            icon="air-filter" 
+            label="Air Quality" 
+            value={weatherWidgetsData?.aqi || 0} 
+            iconColor={weatherWidgetsData?.aqiColor || '#b5c6d6'}
+          />
           <View style={{ flex: 2, marginLeft: 18 }}>
-            <Text style={{ fontFamily: 'Inter_400Regular', color: getSafeString(weatherData.current.aqi_color, '#b5c6d6'), fontSize: 15, marginBottom: 4 }}>{getSafeString(weatherData.current.aqi_status, 'Unknown')}</Text>
+            <Text style={{ fontFamily: 'Inter_400Regular', color: weatherWidgetsData?.aqiColor || '#b5c6d6', fontSize: 15, marginBottom: 4 }}>{weatherWidgetsData?.aqiStatus || 'Unknown'}</Text>
             <View style={{ width: 90, height: 8, backgroundColor: '#e3eaf7', borderRadius: 4, overflow: 'hidden' }}>
-              <View style={{ width: (getSafeTemperature(weatherData.current.aqi) / 500) * 90, height: 8, backgroundColor: getSafeString(weatherData.current.aqi_color, '#b5c6d6'), borderRadius: 4 }} />
+              <View style={{ width: ((weatherWidgetsData?.aqi || 0) / 500) * 90, height: 8, backgroundColor: weatherWidgetsData?.aqiColor || '#b5c6d6', borderRadius: 4 }} />
             </View>
           </View>
         </BlurView>
@@ -544,30 +754,19 @@ export default function HomeScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Hourly Forecast</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.hourlyRow}>
-            {getSafeArray(weatherData.hourly).map((h, i) => {
-              const scale = pressedIndex === i ? 0.96 : 1;
+            {forecastData.hourly.map((h, i) => {
               const anim = hourlyAnims && hourlyAnims[i];
               return (
-                <Animated.View
+                <HourlyForecastItem
                   key={i}
-                  style={{
-                    opacity: anim ? anim : 0,
-                    transform: [
-                      { translateY: anim ? anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) : 0 },
-                      { scale },
-                    ],
-                  }}
-                >
-                  <Pressable
-                    onPressIn={() => setPressedIndex(i)}
-                    onPressOut={() => setPressedIndex(null)}
-                    style={({ pressed }) => [styles.hourlyCard, pressed && { opacity: 0.8 }]}
-                  >
-                    <Text style={styles.hourlyHour}>{getSafeString(h.hour, '--')}</Text>
-                    <Ionicons name={getSafeString(h.icon, 'cloud') as any} size={28} color="#b5c6d6" />
-                    <Text style={styles.hourlyTemp}>{getSafeTemperature(h.temp)}°</Text>
-                  </Pressable>
-                </Animated.View>
+                  hour={getSafeString(h.hour, '--')}
+                  temp={getSafeTemperature(h.temp)}
+                  icon={getSafeString(h.icon, 'cloud')}
+                  index={i}
+                  anim={anim || new Animated.Value(0)}
+                  onPress={() => handleHourlyPress(i)}
+                  isPressed={pressedIndex === i}
+                />
               );
             })}
           </ScrollView>
@@ -577,30 +776,19 @@ export default function HomeScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>5-Day Forecast</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dailyRow}>
-            {getSafeArray(weatherData.daily).map((d, i) => {
-              const scale = pressedIndex === 100 + i ? 0.96 : 1;
+            {forecastData.daily.map((d, i) => {
               const anim = dailyAnims && dailyAnims[i];
               return (
-                <Animated.View
+                <DailyForecastItem
                   key={i}
-                  style={{
-                    opacity: anim ? anim : 0,
-                    transform: [
-                      { translateY: anim ? anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) : 0 },
-                      { scale },
-                    ],
-                  }}
-                >
-                  <Pressable
-                    onPressIn={() => setPressedIndex(100 + i)}
-                    onPressOut={() => setPressedIndex(null)}
-                    style={({ pressed }) => [styles.dailyCard, pressed && { opacity: 0.8 }]}
-                  >
-                    <Text style={styles.dailyDay}>{getSafeString(d.day, '--')}</Text>
-                    <Ionicons name={getSafeString(d.icon, 'cloud') as any} size={28} color="#b5c6d6" />
-                    <Text style={styles.dailyTemp}>{getSafeTemperature(d.temp)}°</Text>
-                  </Pressable>
-                </Animated.View>
+                  day={getSafeString(d.day, '--')}
+                  temp={getSafeTemperature(d.temp)}
+                  icon={getSafeString(d.icon, 'cloud')}
+                  index={100 + i}
+                  anim={anim || new Animated.Value(0)}
+                  onPress={() => handleDailyPress(i)}
+                  isPressed={pressedIndex === 100 + i}
+                />
               );
             })}
           </ScrollView>
