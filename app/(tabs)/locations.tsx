@@ -2,32 +2,27 @@ import { Inter_400Regular, Inter_600SemiBold, useFonts } from '@expo-google-font
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, Easing, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Animated, Dimensions, Easing, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import LoadingScreen from '@/components/LoadingScreen';
 import { LocationData, locationService } from '@/services/locationService';
-import { LoadingState, WeatherData, weatherService } from '@/services/weatherService';
+import { CitySearchResult, weatherService } from '@/services/weatherService';
 
 const { width } = Dimensions.get('window');
 
 interface LocationWithWeather extends LocationData {
-  weather?: WeatherData;
+  weather?: any;
   isCurrent?: boolean;
 }
 
-const CITY_SUGGESTIONS = [
-  { city: 'San Francisco', country: 'US', latitude: 37.7749, longitude: -122.4194 },
-  { city: 'New York', country: 'US', latitude: 40.7128, longitude: -74.0060 },
-  { city: 'London', country: 'GB', latitude: 51.5074, longitude: -0.1278 },
-  { city: 'Tokyo', country: 'JP', latitude: 35.6895, longitude: 139.6917 },
-  { city: 'Paris', country: 'FR', latitude: 48.8566, longitude: 2.3522 },
-  { city: 'Sydney', country: 'AU', latitude: -33.8688, longitude: 151.2093 },
-  { city: 'Berlin', country: 'DE', latitude: 52.52, longitude: 13.405 },
-  { city: 'Toronto', country: 'CA', latitude: 43.6532, longitude: -79.3832 },
-  { city: 'Moscow', country: 'RU', latitude: 55.7558, longitude: 37.6173 },
-  { city: 'Beijing', country: 'CN', latitude: 39.9042, longitude: 116.4074 },
-];
+interface LoadingState {
+  isLoading: boolean;
+  progress: number;
+  message: string;
+  error: string | null;
+}
 
 export default function LocationsScreen() {
   const [fontsLoaded] = useFonts({ Inter_400Regular, Inter_600SemiBold });
@@ -40,13 +35,19 @@ export default function LocationsScreen() {
   });
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<LocationData | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<CitySearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isAddingCity, setIsAddingCity] = useState(false);
+  const [searchTimeout, setSearchTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [loadingWeatherFor, setLoadingWeatherFor] = useState<number | null>(null); // Track which location is loading weather
+  const [showSearch, setShowSearch] = useState(false); // Add state to control search visibility
 
   const [cardAnims, setCardAnims] = useState<Animated.Value[]>([]);
   const shimmerAnim = useRef(new Animated.Value(0)).current;
   const headerFade = useRef(new Animated.Value(0)).current;
-
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<typeof CITY_SUGGESTIONS>([]);
+  const searchInputRef = useRef<TextInput>(null); // Add ref for search input
+  const router = useRouter();
 
   const loadLocationsData = async () => {
     try {
@@ -113,47 +114,139 @@ export default function LocationsScreen() {
     setIsRefreshing(false);
   };
 
-  const handleLocationPress = (location: LocationWithWeather) => {
-    // In a real app, this would navigate to the weather details for this location
-    console.log('Location pressed:', location);
+  const handleLocationPress = async (location: LocationWithWeather, index: number) => {
+    try {
+      // If location already has weather data, just log it (in a real app, this would navigate to details)
+      if (location.weather) {
+        console.log('Location pressed:', location);
+        // TODO: Navigate to weather details screen
+        return;
+      }
+
+      // If location doesn't have weather data, fetch it
+      setLoadingWeatherFor(index);
+      const weather = await weatherService.fetchWeatherData(location.latitude, location.longitude);
+      
+      // Update the location with weather data
+      setLocations(prev => prev.map((loc, i) => 
+        i === index ? { ...loc, weather } : loc
+      ));
+    } catch (error) {
+      console.error('Error fetching weather for location:', error);
+      // Show error message to user
+    } finally {
+      setLoadingWeatherFor(null);
+    }
   };
 
   const handleAddLocation = () => {
-    // In a real app, this would open a location search/add interface
-    console.log('Add location pressed');
+    // Show search interface and focus the input
+    setShowSearch(true);
+    setSearchQuery('');
+    setSearchResults([]);
+    // Focus the search input after a short delay to ensure it's rendered
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 100);
   };
 
-  // Search/filter logic
-  useEffect(() => {
-    if (searchQuery.length === 0) {
+  // Search/filter logic with debouncing
+  const performSearch = useCallback(async (query: string) => {
+    if (!query.trim()) {
       setSearchResults([]);
       return;
     }
-    const results = CITY_SUGGESTIONS.filter(city =>
-      city.city.toLowerCase().includes(searchQuery.toLowerCase())
+
+    setIsSearching(true);
+    try {
+      const results = await weatherService.searchCities(query, 8);
+      setSearchResults(results);
+    } catch (error) {
+      console.error('Search error:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  // Debounced search
+  useEffect(() => {
+    if (searchTimeout) {
+      clearTimeout(searchTimeout);
+    }
+
+    if (searchQuery.trim()) {
+      const timeout = setTimeout(() => {
+        performSearch(searchQuery);
+      }, 500); // 500ms delay
+      setSearchTimeout(timeout);
+    } else {
+      setSearchResults([]);
+    }
+
+    return () => {
+      if (searchTimeout) {
+        clearTimeout(searchTimeout);
+      }
+    };
+  }, [searchQuery, performSearch]);
+
+  // Check if city is already in locations
+  const isCityAlreadyAdded = useCallback((city: CitySearchResult) => {
+    return locations.some(location => 
+      location.latitude === city.latitude && 
+      location.longitude === city.longitude
     );
-    setSearchResults(results);
-  }, [searchQuery]);
+  }, [locations]);
 
   // Add city to locations
-  const handleAddCity = async (city: typeof CITY_SUGGESTIONS[0]) => {
-    setSearchQuery('');
-    setSearchResults([]);
-    setLoadingState(prev => ({ ...prev, isLoading: true, message: `Adding ${city.city}...` }));
-    try {
-      const weather = await weatherService.fetchWeatherData(city.latitude, city.longitude);
-      setLocations(prev => [
-        ...prev,
-        {
-          ...city,
-          weather,
-          isCurrent: false,
-        },
-      ]);
-    } catch (error) {
-      setLoadingState(prev => ({ ...prev, isLoading: false, error: 'Failed to add city.' }));
+  const handleAddCity = async (city: CitySearchResult) => {
+    if (isCityAlreadyAdded(city)) {
+      // City already exists, just clear search
+      setSearchQuery('');
+      setSearchResults([]);
+      setShowSearch(false);
+      return;
     }
-    setLoadingState(prev => ({ ...prev, isLoading: false }));
+
+    setIsAddingCity(true);
+    try {
+      // Create new location using the search result data directly
+      const newLocation: LocationWithWeather = {
+        latitude: city.latitude,
+        longitude: city.longitude,
+        city: city.name, // Use the name from search results
+        country: city.country, // Use the country from search results
+      };
+
+      // Add to locations list
+      setLocations(prev => [...prev, newLocation]);
+      
+      // Fetch weather data for the new location
+      const weather = await weatherService.fetchWeatherData(city.latitude, city.longitude);
+      
+      // Update the location with weather data
+      setLocations(prev => prev.map((loc, i) => 
+        i === prev.length - 1 ? { ...loc, weather } : loc
+      ));
+      
+      // Clear search and close search interface
+      setSearchQuery('');
+      setSearchResults([]);
+      setShowSearch(false);
+      searchInputRef.current?.blur();
+    } catch (error) {
+      console.error('Error adding city:', error);
+      // Still add the location even if weather fetch fails
+      setLocations(prev => [...prev, newLocation]);
+      // Clear search and close search interface
+      setSearchQuery('');
+      setSearchResults([]);
+      setShowSearch(false);
+      searchInputRef.current?.blur();
+    } finally {
+      setIsAddingCity(false);
+    }
   };
 
   useEffect(() => {
@@ -252,28 +345,117 @@ export default function LocationsScreen() {
       />
 
       {/* Search Bar */}
-      <View style={{ paddingHorizontal: 20, paddingTop: 32, marginBottom: 8 }}>
-        <BlurView intensity={40} tint="light" style={{ borderRadius: 16, padding: 8 }}>
+      <View style={styles.searchContainer}>
+        <BlurView intensity={40} tint="light" style={styles.searchBar}>
+          <Ionicons name="search" size={20} color="#b5c6d6" style={{ marginRight: 12 }} />
           <TextInput
-            placeholder="Search city..."
+            ref={searchInputRef}
+            style={styles.searchInput}
+            placeholder="Search cities..."
+            placeholderTextColor="#b5c6d6"
             value={searchQuery}
             onChangeText={setSearchQuery}
-            style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: '#7a8fa6', padding: 8 }}
-            placeholderTextColor="#b5c6d6"
+            autoCapitalize="words"
           />
+          {isSearching && (
+            <View style={styles.searchLoading}>
+              <Animated.View
+                style={{
+                  width: 16,
+                  height: 16,
+                  borderRadius: 8,
+                  borderWidth: 2,
+                  borderColor: '#b5c6d6',
+                  borderTopColor: 'transparent',
+                  transform: [{ rotate: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }],
+                }}
+              />
+            </View>
+          )}
+          {/* Add close button when search is active */}
+          {(showSearch || searchQuery.trim()) && (
+            <Pressable 
+              onPress={() => {
+                setShowSearch(false);
+                setSearchQuery('');
+                setSearchResults([]);
+                searchInputRef.current?.blur();
+              }}
+              style={{ marginLeft: 8 }}
+            >
+              <Ionicons name="close" size={20} color="#b5c6d6" />
+            </Pressable>
+          )}
         </BlurView>
-        {/* Suggestions Dropdown */}
-        {searchResults.length > 0 && (
-          <View style={{ backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 12, marginTop: 4, maxHeight: 180, overflow: 'hidden' }}>
-            <FlatList
-              data={searchResults}
-              keyExtractor={item => item.city + item.country}
-              renderItem={({ item }) => (
-                <TouchableOpacity onPress={() => handleAddCity(item)} style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: '#e3eaf7' }}>
-                  <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 16, color: '#7a8fa6' }}>{item.city}, {item.country}</Text>
-                </TouchableOpacity>
-              )}
-            />
+
+        {/* Search Results */}
+        {(showSearch || searchResults.length > 0) && (
+          <BlurView intensity={50} tint="light" style={styles.searchResults}>
+            <ScrollView style={{ maxHeight: 200 }} showsVerticalScrollIndicator={false}>
+              {searchResults.map((city, index) => {
+                const isAlreadyAdded = isCityAlreadyAdded(city);
+                return (
+                  <TouchableOpacity
+                    key={`${city.name}-${city.country}-${index}`}
+                    style={[styles.searchResultItem, isAlreadyAdded && styles.searchResultItemDisabled]}
+                    onPress={() => !isAlreadyAdded && handleAddCity(city)}
+                    disabled={isAlreadyAdded || isAddingCity}
+                  >
+                    <View style={styles.searchResultContent}>
+                      <Text style={[styles.searchResultCity, isAlreadyAdded && styles.searchResultCityDisabled]}>
+                        {city.name}
+                      </Text>
+                      <Text style={[styles.searchResultCountry, isAlreadyAdded && styles.searchResultCountryDisabled]}>
+                        {city.state ? `${city.state}, ` : ''}{city.country}
+                      </Text>
+                    </View>
+                    {isAlreadyAdded ? (
+                      <Ionicons name="checkmark-circle" size={20} color="#7ed957" />
+                    ) : (
+                      <Ionicons name="add-circle-outline" size={20} color="#b5c6d6" />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </BlurView>
+        )}
+
+        {/* No Results State */}
+        {showSearch && searchQuery.trim() && !isSearching && searchResults.length === 0 && (
+          <BlurView intensity={50} tint="light" style={styles.noResultsCard}>
+            <Ionicons name="search-outline" size={24} color="#b5c6d6" />
+            <Text style={styles.noResultsText}>No cities found</Text>
+            <Text style={styles.noResultsSubtext}>Try a different search term</Text>
+          </BlurView>
+        )}
+
+        {/* Search Prompt */}
+        {showSearch && !searchQuery.trim() && (
+          <BlurView intensity={50} tint="light" style={styles.searchPromptCard}>
+            <Ionicons name="search-outline" size={24} color="#b5c6d6" />
+            <Text style={styles.searchPromptText}>Start typing to search cities</Text>
+            <Text style={styles.searchPromptSubtext}>Search for any city worldwide</Text>
+          </BlurView>
+        )}
+
+        {/* Adding City Loading Overlay */}
+        {isAddingCity && (
+          <View style={styles.addingOverlay}>
+            <BlurView intensity={60} tint="light" style={styles.addingCard}>
+              <Animated.View
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 12,
+                  borderWidth: 2,
+                  borderColor: '#7ed957',
+                  borderTopColor: 'transparent',
+                  transform: [{ rotate: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }],
+                }}
+              />
+              <Text style={styles.addingText}>Adding city...</Text>
+            </BlurView>
           </View>
         )}
       </View>
@@ -315,60 +497,48 @@ export default function LocationsScreen() {
                 },
               ]}
             >
-              <Pressable onPress={() => handleLocationPress(location)} style={styles.cardPressable}>
+              <Pressable onPress={() => handleLocationPress(location, index)} style={styles.cardPressable}>
                 <BlurView intensity={60} tint="light" style={styles.cardBlur}>
-                  <View style={styles.cardHeader}>
-                    <View style={styles.locationInfo}>
-                      <Text style={styles.cityName}>{location.city}</Text>
-                      <Text style={styles.countryName}>{location.country}</Text>
-                      {location.isCurrent && (
-                        <View style={styles.currentBadge}>
-                          <Ionicons name="location" size={12} color="#7ed957" />
-                          <Text style={styles.currentText}>Current</Text>
+                  {({ pressed }) => (
+                    <View style={[styles.cardContent, pressed && { opacity: 0.8 }]}>
+                      <View style={styles.cardHeader}>
+                        <View style={styles.locationInfo}>
+                          <Text style={styles.cityName}>{location.city}</Text>
+                          <Text style={styles.countryName}>{location.country}</Text>
+                          {location.isCurrent && (
+                            <View style={styles.currentBadge}>
+                              <Ionicons name="location" size={12} color="#7ed957" />
+                              <Text style={styles.currentText}>Current</Text>
+                            </View>
+                          )}
+                        </View>
+                        {loadingWeatherFor === index ? (
+                          <Animated.View
+                            style={{
+                              width: 20,
+                              height: 20,
+                              borderRadius: 10,
+                              borderWidth: 2,
+                              borderColor: '#7ed957',
+                              borderTopColor: 'transparent',
+                              transform: [{ rotate: shimmerAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }],
+                            }}
+                          />
+                        ) : (
+                          <Ionicons name="chevron-forward" size={24} color="#b5c6d6" />
+                        )}
+                      </View>
+                      {location.weather && (
+                        <View style={styles.weatherInfo}>
+                          <View style={styles.weatherRow}>
+                            <Ionicons name={location.weather.current.icon as any} size={20} color="#b5c6d6" />
+                            <Text style={styles.weatherTemp}>{location.weather.current.temp}°</Text>
+                            <Text style={styles.weatherDesc}>{location.weather.current.description}</Text>
+                          </View>
                         </View>
                       )}
                     </View>
-                    <Ionicons name="chevron-forward" size={24} color="#b5c6d6" />
-                  </View>
-
-                  {location.weather && (
-                    <View style={styles.weatherInfo}>
-                      <View style={styles.weatherMain}>
-                        <Ionicons name={location.weather.current.icon as any} size={32} color="#b5c6d6" />
-                        <Text style={styles.temperature}>{location.weather.current.temp}°</Text>
-                      </View>
-                      <Text style={styles.weatherDescription}>{location.weather.current.description}</Text>
-                      <View style={styles.weatherDetails}>
-                        <View style={styles.detailItem}>
-                          <Ionicons name="water" size={16} color="#b5c6d6" />
-                          <Text style={styles.detailText}>{location.weather.current.humidity}%</Text>
-                        </View>
-                        <View style={styles.detailItem}>
-                          <Ionicons name="navigate" size={16} color="#b5c6d6" />
-                          <Text style={styles.detailText}>{location.weather.current.wind_speed} mph</Text>
-                        </View>
-                      </View>
-                    </View>
                   )}
-
-                  {/* Shimmer effect */}
-                  <Animated.View
-                    pointerEvents="none"
-                    style={[
-                      StyleSheet.absoluteFill,
-                      {
-                        opacity: 0.1,
-                        transform: [{ translateX: shimmerTranslate }, { rotate: '15deg' }],
-                      },
-                    ]}
-                  >
-                    <LinearGradient
-                      colors={["#fff", "#e3eaf7", "#fff"]}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={{ flex: 1, width: 120 }}
-                    />
-                  </Animated.View>
                 </BlurView>
               </Pressable>
             </Animated.View>
@@ -487,6 +657,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(200,220,255,0.18)',
   },
+  cardContent: {
+    flex: 1,
+  },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -519,37 +692,25 @@ const styles = StyleSheet.create({
   },
   weatherInfo: {
     marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(227, 234, 247, 0.3)',
   },
-  weatherMain: {
+  weatherRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 4,
   },
-  temperature: {
+  weatherTemp: {
     fontFamily: 'Inter_600SemiBold',
     fontSize: 18,
     color: '#7a8fa6',
     marginLeft: 8,
   },
-  weatherDescription: {
+  weatherDesc: {
     fontFamily: 'Inter_400Regular',
     fontSize: 14,
     color: '#b5c6d6',
-  },
-  weatherDetails: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 4,
-  },
-  detailItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  detailText: {
-    fontFamily: 'Inter_400Regular',
-    fontSize: 13,
-    color: '#b5c6d6',
+    marginLeft: 8,
   },
   addLocationButton: {
     borderRadius: 20,
@@ -577,6 +738,130 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(200,220,255,0.18)',
   },
   infoText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    color: '#b5c6d6',
+  },
+  searchContainer: {
+    paddingHorizontal: 20,
+    paddingTop: 32,
+    marginBottom: 8,
+  },
+  searchBar: {
+    borderRadius: 16,
+    padding: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  searchInput: {
+    flex: 1,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 16,
+    color: '#7a8fa6',
+  },
+  searchLoading: {
+    marginLeft: 12,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#b5c6d6',
+    borderTopColor: 'transparent',
+  },
+  searchResults: {
+    borderRadius: 12,
+    marginTop: 4,
+    maxHeight: 200,
+    overflow: 'hidden',
+  },
+  searchResultItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(227, 234, 247, 0.3)',
+  },
+  searchResultItemDisabled: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    opacity: 0.6,
+  },
+  searchResultContent: {
+    flex: 1,
+  },
+  searchResultCity: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 16,
+    color: '#7a8fa6',
+    marginBottom: 2,
+  },
+  searchResultCityDisabled: {
+    color: '#b5c6d6',
+  },
+  searchResultCountry: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    color: '#b5c6d6',
+  },
+  searchResultCountryDisabled: {
+    color: '#7a8fa6',
+  },
+  addingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  addingCard: {
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderRadius: 20,
+    padding: 20,
+    alignItems: 'center',
+  },
+  addingText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 16,
+    color: '#7a8fa6',
+    marginTop: 12,
+  },
+  noResultsCard: {
+    borderRadius: 12,
+    padding: 20,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(200,220,255,0.18)',
+    alignItems: 'center',
+  },
+  noResultsText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 18,
+    color: '#7a8fa6',
+    marginBottom: 8,
+  },
+  noResultsSubtext: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    color: '#b5c6d6',
+  },
+  searchPromptCard: {
+    borderRadius: 12,
+    padding: 20,
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(200,220,255,0.18)',
+    alignItems: 'center',
+  },
+  searchPromptText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 18,
+    color: '#7a8fa6',
+    marginBottom: 8,
+  },
+  searchPromptSubtext: {
     fontFamily: 'Inter_400Regular',
     fontSize: 14,
     color: '#b5c6d6',

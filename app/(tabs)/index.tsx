@@ -4,7 +4,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, Easing, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Animated, Dimensions, Easing, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import LoadingScreen from '@/components/LoadingScreen';
 import ScreenTransition from '@/components/ScreenTransition';
@@ -57,7 +57,23 @@ export default function HomeScreen() {
   const [pressedIndex, setPressedIndex] = useState<number | null>(null);
   const router = useRouter();
 
-  const tempValue = useCountUp(weatherData?.current.temp || 0, 1200);
+  // Safe data access functions
+  const getSafeTemperature = (temp: any): number => {
+    if (typeof temp === 'number' && !isNaN(temp)) {
+      return Math.round(temp);
+    }
+    return 0;
+  };
+
+  const getSafeString = (value: any, fallback: string = ''): string => {
+    return typeof value === 'string' ? value : fallback;
+  };
+
+  const getSafeArray = (value: any): any[] => {
+    return Array.isArray(value) ? value : [];
+  };
+
+  const tempValue = useCountUp(getSafeTemperature(weatherData?.current.temp) || 0, 1200);
 
   // Load weather data with real location
   const loadWeatherData = useCallback(async (showProgress = true) => {
@@ -67,14 +83,25 @@ export default function HomeScreen() {
       // Try to load cached data first
       const cachedData = await weatherService.getCachedWeatherData();
       if (cachedData && !showProgress) {
-        setWeatherData(cachedData);
-        setLoadingState(prev => ({ ...prev, isLoading: false }));
-        return;
+        // Validate cached data before using it
+        if (isValidWeatherData(cachedData)) {
+          setWeatherData(cachedData);
+          setLoadingState(prev => ({ ...prev, isLoading: false }));
+          return;
+        } else {
+          console.warn('Invalid cached data found, clearing cache');
+          await weatherService.clearCache();
+        }
       }
 
       // Get current location
       setLoadingState(prev => ({ ...prev, progress: 0.1, message: 'Getting your location...' }));
       const location = await locationService.getCurrentLocation();
+      
+      // Validate location data
+      if (!location || !isValidLocationData(location)) {
+        throw new Error('Invalid location data received');
+      }
       
       // Get location name
       setLoadingState(prev => ({ ...prev, progress: 0.2, message: 'Finding your city...' }));
@@ -84,6 +111,11 @@ export default function HomeScreen() {
       const data = await weatherService.fetchWeatherData(location.latitude, location.longitude, (progress, message) => {
         setLoadingState(prev => ({ ...prev, progress: 0.2 + (progress * 0.8), message }));
       });
+
+      // Validate weather data before setting it
+      if (!isValidWeatherData(data)) {
+        throw new Error('Invalid weather data received from API');
+      }
 
       // Update location name if not provided by weather API
       if (!data.location.city || data.location.city === 'Unknown City') {
@@ -103,6 +135,73 @@ export default function HomeScreen() {
       }));
     }
   }, []);
+
+  // Data validation functions
+  const isValidWeatherData = (data: any): data is WeatherData => {
+    try {
+      if (!data || typeof data !== 'object') return false;
+
+      // Check required top-level fields
+      const requiredFields = ['current', 'hourly', 'daily', 'location', 'lastUpdated'];
+      for (const field of requiredFields) {
+        if (!(field in data)) {
+          console.warn(`Weather data missing required field: ${field}`);
+          return false;
+        }
+      }
+
+      // Validate current weather
+      const current = data.current;
+      if (!current || typeof current !== 'object') return false;
+
+      const currentRequired = ['temp', 'feels_like', 'humidity', 'wind_speed', 'description', 'icon', 'precipitation'];
+      for (const field of currentRequired) {
+        if (!(field in current) || typeof current[field] === 'undefined') {
+          console.warn(`Current weather missing field: ${field}`);
+          return false;
+        }
+      }
+
+      // Validate arrays
+      if (!Array.isArray(data.hourly) || !Array.isArray(data.daily)) {
+        console.warn('Weather data has invalid hourly or daily arrays');
+        return false;
+      }
+
+      // Validate location
+      const location = data.location;
+      if (!location || typeof location !== 'object' || 
+          !location.city || !location.country) {
+        console.warn('Weather data has invalid location');
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error validating weather data:', error);
+      return false;
+    }
+  };
+
+  const isValidLocationData = (data: any): boolean => {
+    try {
+      if (!data || typeof data !== 'object') return false;
+
+      const { latitude, longitude } = data;
+      
+      return (
+        typeof latitude === 'number' &&
+        typeof longitude === 'number' &&
+        !isNaN(latitude) &&
+        !isNaN(longitude) &&
+        latitude >= -90 && latitude <= 90 &&
+        longitude >= -180 && longitude <= 180
+      );
+    } catch (error) {
+      console.error('Error validating location data:', error);
+      return false;
+    }
+  };
 
   // Refresh weather data
   const refreshWeather = useCallback(async () => {
@@ -269,7 +368,7 @@ export default function HomeScreen() {
       {/* Last Updated Widget */}
       <View style={{ position: 'absolute', top: 18, left: 0, right: 0, alignItems: 'center', zIndex: 10 }}>
         <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, opacity: 0.7 }}>
-          {`Last updated: ${weatherData.lastUpdated}`}
+          {`Last updated: ${getSafeString(weatherData.lastUpdated, 'Unknown')}`}
         </Text>
       </View>
 
@@ -291,14 +390,18 @@ export default function HomeScreen() {
           { useNativeDriver: true }
         )}
         refreshControl={
-          <Animated.View style={{ opacity: isRefreshing ? 1 : 0 }}>
-            <LoadingScreen message="Refreshing weather..." showProgress={true} progress={0.5} />
-          </Animated.View>
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={refreshWeather}
+            tintColor="#7a8fa6"
+            colors={["#7a8fa6"]}
+            progressBackgroundColor="rgba(255,255,255,0.8)"
+          />
         }
       >
         {/* Header with City, Date, Animated Cloud */}
         <Animated.View style={[styles.header, { transform: [{ translateY: headerTranslate }], opacity: headerFade }]}> 
-          <Text style={styles.city}>{weatherData.location.city}</Text>
+          <Text style={styles.city}>{getSafeString(weatherData.location.city, 'Unknown City')}</Text>
           <Animated.Text style={[styles.date, { opacity: dateFade }]}>
             {new Date().toLocaleDateString('en-US', { weekday: 'long', hour: 'numeric', minute: '2-digit' })}
           </Animated.Text>
@@ -309,7 +412,7 @@ export default function HomeScreen() {
               { scale: 1.1 },
             ],
           }}>
-            <Ionicons name={weatherData.current.icon as any} size={54} color="#b5c6d6" style={styles.cloudIcon} />
+            <Ionicons name={getSafeString(weatherData.current.icon, 'cloud') as any} size={54} color="#b5c6d6" style={styles.cloudIcon} />
           </Animated.View>
         </Animated.View>
 
@@ -338,24 +441,34 @@ export default function HomeScreen() {
                 style={{ flex: 1, width: 120 }}
               />
             </Animated.View>
-            <Animated.Text style={[styles.temp, { opacity: summaryFade }]}>{tempValue}°</Animated.Text>
-            <Animated.Text style={[styles.summary, { opacity: summaryFade, transform: [{ translateY: summaryFade.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }] }]}>
-              {weatherData.current.description}
+            <Animated.Text style={[styles.temp, { opacity: summaryFade }]}>{getSafeTemperature(weatherData.current.temp)}°</Animated.Text>
+            <Animated.Text style={[styles.summary, { 
+              opacity: summaryFade, 
+              transform: [{ 
+                translateY: summaryFade ? summaryFade.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) : 0 
+              }] 
+            }]}>
+              {getSafeString(weatherData.current.description, 'Unknown conditions')}
             </Animated.Text>
-            <Animated.View style={[styles.detailsRow, { opacity: detailsFade, transform: [{ translateY: detailsFade.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) }] }] }>
+            <Animated.View style={[styles.detailsRow, { 
+              opacity: detailsFade, 
+              transform: [{ 
+                translateY: detailsFade ? detailsFade.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) : 0 
+              }] 
+            }] }>
               <View style={styles.detailItem}>
                 <Ionicons name="water" size={20} color="#b5c6d6" />
-                <Text style={styles.detailValue}>{weatherData.current.humidity}%</Text>
+                <Text style={styles.detailValue}>{getSafeTemperature(weatherData.current.humidity)}%</Text>
                 <Text style={styles.detailLabel}>Humidity</Text>
               </View>
               <View style={styles.detailItem}>
                 <Ionicons name="navigate" size={20} color="#b5c6d6" />
-                <Text style={styles.detailValue}>{weatherData.current.wind_speed} mph</Text>
+                <Text style={styles.detailValue}>{getSafeTemperature(weatherData.current.wind_speed)} km/h</Text>
                 <Text style={styles.detailLabel}>Wind</Text>
               </View>
               <View style={styles.detailItem}>
                 <Ionicons name="eye" size={20} color="#b5c6d6" />
-                <Text style={styles.detailValue}>{weatherData.current.visibility} mi</Text>
+                <Text style={styles.detailValue}>{getSafeTemperature(weatherData.current.visibility)} km</Text>
                 <Text style={styles.detailLabel}>Visibility</Text>
               </View>
             </Animated.View>
@@ -367,18 +480,33 @@ export default function HomeScreen() {
           <View style={{ flex: 1, alignItems: 'center' }}>
             <MaterialCommunityIcons name="thermometer" size={28} color="#b5c6d6" />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Feels Like</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{weatherData.current.feels_like}°</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.feels_like)}°</Text>
           </View>
           <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
           <View style={{ flex: 1, alignItems: 'center' }}>
             <MaterialCommunityIcons name="weather-sunny-alert" size={28} color="#f7c873" />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>UV Index</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
-              <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18 }}>{weatherData.current.uv_index}</Text>
+              <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18 }}>{getSafeTemperature(weatherData.current.uv_index)}</Text>
               <View style={{ width: 60, height: 8, backgroundColor: '#e3eaf7', borderRadius: 4, marginLeft: 8, overflow: 'hidden' }}>
-                <View style={{ width: (weatherData.current.uv_index / 11) * 60, height: 8, backgroundColor: '#f7c873', borderRadius: 4 }} />
+                <View style={{ width: (getSafeTemperature(weatherData.current.uv_index) / 11) * 60, height: 8, backgroundColor: '#f7c873', borderRadius: 4 }} />
               </View>
             </View>
+          </View>
+        </BlurView>
+
+        {/* Precipitation Widget */}
+        <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
+          <View style={{ flex: 1, alignItems: 'center' }}>
+            <Ionicons name="rainy" size={28} color="#7a8fa6" />
+            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Precipitation</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.precipitation)}%</Text>
+          </View>
+          <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
+          <View style={{ flex: 1, alignItems: 'center' }}>
+            <Ionicons name="cloud" size={28} color="#b5c6d6" />
+            <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Conditions</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 16, marginTop: 2, textAlign: 'center' }}>{getSafeString(weatherData.current.description, 'Unknown')}</Text>
           </View>
         </BlurView>
 
@@ -387,27 +515,27 @@ export default function HomeScreen() {
           <View style={{ flex: 1, alignItems: 'center' }}>
             <Ionicons name="sunny-outline" size={28} color="#f7c873" />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Sunrise</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{weatherData.current.sunrise}</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeString(weatherData.current.sunrise, '--:--')}</Text>
           </View>
           <View style={{ width: 1, height: 38, backgroundColor: '#e3eaf7', marginHorizontal: 18, opacity: 0.18 }} />
           <View style={{ flex: 1, alignItems: 'center' }}>
             <Ionicons name="moon-outline" size={28} color="#b5c6d6" />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Sunset</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{weatherData.current.sunset}</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeString(weatherData.current.sunset, '--:--')}</Text>
           </View>
         </BlurView>
 
         {/* Air Quality Widget */}
         <BlurView intensity={50} tint="light" style={[styles.glassCard, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 18, paddingHorizontal: 24 }]}> 
           <View style={{ flex: 1, alignItems: 'center' }}>
-            <MaterialCommunityIcons name="air-filter" size={28} color={weatherData.current.aqi_color} />
+            <MaterialCommunityIcons name="air-filter" size={28} color={getSafeString(weatherData.current.aqi_color, '#b5c6d6')} />
             <Text style={{ fontFamily: 'Inter_400Regular', color: '#b5c6d6', fontSize: 13, marginTop: 2 }}>Air Quality</Text>
-            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{weatherData.current.aqi}</Text>
+            <Text style={{ fontFamily: 'Inter_600SemiBold', color: '#7a8fa6', fontSize: 18, marginTop: 2 }}>{getSafeTemperature(weatherData.current.aqi)}</Text>
           </View>
           <View style={{ flex: 2, marginLeft: 18 }}>
-            <Text style={{ fontFamily: 'Inter_400Regular', color: weatherData.current.aqi_color, fontSize: 15, marginBottom: 4 }}>{weatherData.current.aqi_status}</Text>
+            <Text style={{ fontFamily: 'Inter_400Regular', color: getSafeString(weatherData.current.aqi_color, '#b5c6d6'), fontSize: 15, marginBottom: 4 }}>{getSafeString(weatherData.current.aqi_status, 'Unknown')}</Text>
             <View style={{ width: 90, height: 8, backgroundColor: '#e3eaf7', borderRadius: 4, overflow: 'hidden' }}>
-              <View style={{ width: (weatherData.current.aqi / 500) * 90, height: 8, backgroundColor: weatherData.current.aqi_color, borderRadius: 4 }} />
+              <View style={{ width: (getSafeTemperature(weatherData.current.aqi) / 500) * 90, height: 8, backgroundColor: getSafeString(weatherData.current.aqi_color, '#b5c6d6'), borderRadius: 4 }} />
             </View>
           </View>
         </BlurView>
@@ -416,14 +544,14 @@ export default function HomeScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Hourly Forecast</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.hourlyRow}>
-            {weatherData.hourly.map((h, i) => {
+            {getSafeArray(weatherData.hourly).map((h, i) => {
               const scale = pressedIndex === i ? 0.96 : 1;
-              const anim = hourlyAnims[i];
+              const anim = hourlyAnims && hourlyAnims[i];
               return (
                 <Animated.View
                   key={i}
                   style={{
-                    opacity: anim || 0,
+                    opacity: anim ? anim : 0,
                     transform: [
                       { translateY: anim ? anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) : 0 },
                       { scale },
@@ -435,9 +563,9 @@ export default function HomeScreen() {
                     onPressOut={() => setPressedIndex(null)}
                     style={({ pressed }) => [styles.hourlyCard, pressed && { opacity: 0.8 }]}
                   >
-                    <Text style={styles.hourlyHour}>{h.hour}</Text>
-                    <Ionicons name={h.icon as any} size={28} color="#b5c6d6" />
-                    <Text style={styles.hourlyTemp}>{h.temp}°</Text>
+                    <Text style={styles.hourlyHour}>{getSafeString(h.hour, '--')}</Text>
+                    <Ionicons name={getSafeString(h.icon, 'cloud') as any} size={28} color="#b5c6d6" />
+                    <Text style={styles.hourlyTemp}>{getSafeTemperature(h.temp)}°</Text>
                   </Pressable>
                 </Animated.View>
               );
@@ -449,14 +577,14 @@ export default function HomeScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>5-Day Forecast</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.dailyRow}>
-            {weatherData.daily.map((d, i) => {
+            {getSafeArray(weatherData.daily).map((d, i) => {
               const scale = pressedIndex === 100 + i ? 0.96 : 1;
-              const anim = dailyAnims[i];
+              const anim = dailyAnims && dailyAnims[i];
               return (
                 <Animated.View
                   key={i}
                   style={{
-                    opacity: anim || 0,
+                    opacity: anim ? anim : 0,
                     transform: [
                       { translateY: anim ? anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) : 0 },
                       { scale },
@@ -468,9 +596,9 @@ export default function HomeScreen() {
                     onPressOut={() => setPressedIndex(null)}
                     style={({ pressed }) => [styles.dailyCard, pressed && { opacity: 0.8 }]}
                   >
-                    <Text style={styles.dailyDay}>{d.day}</Text>
-                    <Ionicons name={d.icon as any} size={28} color="#b5c6d6" />
-                    <Text style={styles.dailyTemp}>{d.temp}°</Text>
+                    <Text style={styles.dailyDay}>{getSafeString(d.day, '--')}</Text>
+                    <Ionicons name={getSafeString(d.icon, 'cloud') as any} size={28} color="#b5c6d6" />
+                    <Text style={styles.dailyTemp}>{getSafeTemperature(d.temp)}°</Text>
                   </Pressable>
                 </Animated.View>
               );
@@ -747,3 +875,4 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
 });
+
