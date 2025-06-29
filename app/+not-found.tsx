@@ -97,12 +97,6 @@ export default function NotFoundScreen() {
           <Animated.View style={[styles.linksContainer, { opacity: buttonAnim }]}>
             <Text style={styles.linksTitle}>Quick Navigation</Text>
             <View style={styles.linksRow}>
-              <Link href="/(tabs)/locations" asChild>
-                <Pressable style={styles.linkItem}>
-                  <Ionicons name="location" size={16} color="#7a8fa6" />
-                  <Text style={styles.linkText}>Locations</Text>
-                </Pressable>
-              </Link>
               <Link href="/(tabs)/forecast" asChild>
                 <Pressable style={styles.linkItem}>
                   <Ionicons name="partly-sunny" size={16} color="#7a8fa6" />

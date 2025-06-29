@@ -13,7 +13,6 @@ export default function TabLayout() {
     new Animated.Value(0),
     new Animated.Value(0),
     new Animated.Value(0),
-    new Animated.Value(0),
   ]).current;
 
   useEffect(() => {
@@ -146,8 +145,6 @@ export default function TabLayout() {
     switch (routeName) {
       case 'index':
         return isFocused ? 'home' : 'home-outline';
-      case 'locations':
-        return isFocused ? 'location' : 'location-outline';
       case 'forecast':
         return isFocused ? 'partly-sunny' : 'partly-sunny-outline';
       case 'settings':
@@ -169,12 +166,6 @@ export default function TabLayout() {
         name="index"
         options={{
           title: 'Home',
-        }}
-      />
-      <Tabs.Screen
-        name="locations"
-        options={{
-          title: 'Locations',
         }}
       />
       <Tabs.Screen
